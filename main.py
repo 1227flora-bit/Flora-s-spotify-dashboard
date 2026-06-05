@@ -29,12 +29,13 @@ def read_and_clean_data():
 
     # 1. 核心時間與分鐘數轉換
     if "ms_played" in df.columns:
-        df["聆聽分鐘"] = df["ms_played"] / 60000
+        # 統一將基礎清洗欄位命名為 聆聽總分鐘數
+        df["聆聽總分鐘數"] = df["ms_played"] / 60000
 
     if "ts" in df.columns:
         # 轉換為時間格式，並處理時區
         df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
-        # 建立「年-月」欄位供折線圖使用
+        # 建立 年-月 欄位供折線圖使用
         df["年月"] = df["ts"].dt.to_period("M").astype(str)
 
     # 2. 清洗文字空格
@@ -66,7 +67,7 @@ def get_stats():
     if "ms_played" in df.columns:
         total_hours = round(df["ms_played"].sum() / 3600000, 1)
 
-    # 核心新增：計算「不重複歌曲數」（結合歌名與歌手，避免同歌名不同人算同一首）
+    # 計算不重複歌曲數（結合歌名與歌手，避免同歌名不同人算同一首）
     df["unique_song_key"] = df[song_col] + " - " + df[artist_col]
     unique_songs_count = df["unique_song_key"].nunique()
 
@@ -74,7 +75,7 @@ def get_stats():
         "total_plays": int(df.shape[0]),
         "unique_artists": int(df[artist_col].nunique()),
         "unique_albums": int(df[album_col].nunique()),
-        "unique_songs": int(unique_songs_count),  # 🔥 新增不重複歌曲指標
+        "unique_songs": int(unique_songs_count),
         "total_hours": total_hours,
     }
     return stats
@@ -86,15 +87,15 @@ def get_artist_chart_data():
     df = read_and_clean_data()
     artist_col = "Artist" if "Artist" in df.columns else df.columns[4]
 
-    if artist_col not in df.columns or "聆聽分鐘" not in df.columns:
+    if artist_col not in df.columns or "聆聽總分鐘數" not in df.columns:
         return []
 
-    # 同時計算每個歌手的「點播次數」與「聆聽分鐘數總和」
+    # 同時計算每個歌手的 點播次數 與 聆聽分鐘數總和
     artist_summary = (
         df.groupby(artist_col)
         .agg(
             Count=(artist_col, "size"),
-            Total_Minutes=("聆聽分鐘", "sum"),
+            Total_Minutes=("聆聽總分鐘數", "sum"),
         )
         .reset_index()
     )
@@ -114,60 +115,42 @@ def get_artist_chart_data():
 @app.get("/api/chart/monthly_trend")
 def get_monthly_trend():
     df = read_and_clean_data()
-    if "年月" not in df.columns or "聆聽分鐘" not in df.columns:
+    if "年月" not in df.columns or "聆聽總分鐘數" not in df.columns:
         return []
     # 依照年月分組，計算聆聽分鐘數總和
-    trend = df.groupby("年月")["聆聽分鐘"].sum().reset_index()
+    trend = df.groupby("年月")["聆聽總分鐘數"].sum().reset_index()
     trend = trend.sort_values("年月")
-    trend["聆聽分鐘"] = trend["聆聽分鐘"].round(1)
+    trend["聆聽總分鐘數"] = trend["聆聽總分鐘數"].round(1)
     return trend.to_dict(orient="records")
 
 
-# 3. 獲取前 30 名歌手的「聆聽時間最長冠軍單曲」數據 (供新長條圖使用)
-@app.get("/api/chart/artist_top_song")
-def get_artist_top_song():
+# 3. 獲取 24 小時時段的聆聽分鐘數分佈數據 (供新時段長條圖使用)
+@app.get("/api/chart/hourly_distribution")
+def get_hourly_distribution():
     df = read_and_clean_data()
-    song_col = "歌曲名" if "歌曲名" in df.columns else df.columns[3]
-    artist_col = "Artist" if "Artist" in df.columns else df.columns[4]
 
-    if (
-        artist_col not in df.columns
-        or song_col not in df.columns
-        or "聆聽分鐘" not in df.columns
-    ):
+    if "ts" not in df.columns or "聆聽總分鐘數" not in df.columns:
         return []
 
-    # 步驟 A: 先找出點播次數前 30 名的歌手清單（與樹狀圖同步）
-    top_30_artists = df[artist_col].value_counts().head(30).index.tolist()
+    # 確保 ts 是時間格式
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df = df[df["ts"].notna()]
 
-    # 篩選資料，只留下這 30 位歌手的紀錄
-    df_sub = df[df[artist_col].isin(top_30_artists)]
+    # 核心轉換：提取小時 (0-23)，並轉換成台灣時間 (UTC+8)
+    df["小時"] = (df["ts"].dt.hour + 8) % 24
 
-    # 步驟 B: 計算「每位歌手、每首歌曲」的總聆聽分鐘數
-    song_minutes = (
-        df_sub.groupby([artist_col, song_col])["聆聽分鐘"].sum().reset_index()
-    )
+    # 依小時分組，計算總聆聽分鐘數
+    hourly_data = df.groupby("小時")["聆聽總分鐘數"].sum().reset_index()
 
-    # 步驟 C: 找出每位歌手聆聽分鐘數最高（Rank 1）的那首歌
-    # idxmax() 可以精準抓出每組最大值的索引位置
-    top_songs_idx = song_minutes.groupby(artist_col)["聆聽分鐘"].idxmax()
-    final_top_songs = song_minutes.loc[top_songs_idx].copy()
+    # 補齊沒有聽歌的小時（確保 0-23 點都有柱子）
+    all_hours = pd.DataFrame({"小時": list(range(24))})
+    hourly_data = pd.merge(all_hours, hourly_data, on="小時", how="left").fillna(0)
 
-    # 欄位重新命名方便前端讀取
-    final_top_songs.columns = ["Artist", "Song_Name", "Minutes"]
-    final_top_songs["Minutes"] = final_top_songs["Minutes"].round(1)
+    # 四捨五入並依小時順序排序
+    hourly_data["聆聽總分鐘數"] = hourly_data["聆聽總分鐘數"].round(1)
+    hourly_data = hourly_data.sort_values(by="小時")
 
-    # 建立一個結合「歌手 + 歌名」的標籤，讓長條圖 Y 軸一目了然
-    final_top_songs["Display_Label"] = (
-        final_top_songs["Artist"] + " - 《" + final_top_songs["Song_Name"] + "》"
-    )
-
-    # 依分鐘數由大到小排序
-    final_top_songs = final_top_songs.sort_values(
-        by="Minutes", ascending=False
-    )
-
-    return final_top_songs.to_dict(orient="records")
+    return hourly_data.to_dict(orient="records")
 
 
 # 4. Top 100 歌曲排行榜數據 (供表格使用)
@@ -179,18 +162,17 @@ def get_top100_songs():
 
     # 以 歌曲名 + 歌手 進行分組加總，避免同名異曲狀況
     top_songs = (
-        df.groupby([song_col, artist_col])["聆聽分鐘"].sum().reset_index()
+        df.groupby([song_col, artist_col])["聆聽總分鐘數"].sum().reset_index()
     )
     top_songs.columns = ["歌曲名", "Artist", "總聆聽分鐘數"]
     top_songs["總聆聽分鐘數"] = top_songs["總聆聽分鐘數"].round(1)
 
     # 取前 100 名
-    top100 = top_songs.sort_values(by="總聆聽分鐘數", ascending=False).head(
-        100
-    )
+    top100 = top_songs.sort_values(by="總聆聽分鐘數", ascending=False).head(100)
     return top100.to_dict(orient="records")
 
-# 5. 獲取每年聆聽分鐘數最高的歌手與歌曲 (年度冠軍王)
+
+# 5. 獲取每年聆聽分鐘數最高的前 3 名歌手與歌曲 (年度 Top 3 榜單)
 @app.get("/api/chart/yearly_champions")
 def get_yearly_champions():
     df = read_and_clean_data()
@@ -201,13 +183,12 @@ def get_yearly_champions():
         "ts" not in df.columns
         or artist_col not in df.columns
         or song_col not in df.columns
-        or "聆聽分鐘" not in df.columns
+        or "聆聽總分鐘數" not in df.columns
     ):
         return []
 
-    # 建立「年份」欄位
+    # 建立 年份 欄位
     df["年份"] = df["ts"].dt.year
-    # 過濾掉時間轉換失敗的無效年份
     df = df[df["年份"].notna()]
 
     yearly_data = []
@@ -218,28 +199,53 @@ def get_yearly_champions():
         if df_year.empty:
             continue
 
-        # A. 找出該年總分鐘數最高的歌手
-        artist_mins = df_year.groupby(artist_col)["聆聽分鐘"].sum()
-        top_artist = artist_mins.idxmax()
-        top_artist_mins = round(artist_mins.max(), 1)
+        # A. 撈出該年總分鐘數前 3 名的歌手
+        artist_mins = df_year.groupby(artist_col)["聆聽總分鐘數"].sum().reset_index()
+        top_artists_df = artist_mins.sort_values(by="聆聽總分鐘數", ascending=False).head(3)
+        top_artists_list = [
+            {"name": row[artist_col], "mins": round(row["聆聽總分鐘數"], 1)}
+            for _, row in top_artists_df.iterrows()
+        ]
 
-        # B. 找出該年總分鐘數最高的歌曲
+        # B. 撈出該年總分鐘數前 3 名的歌曲
         song_mins = (
-            df_year.groupby([song_col, artist_col])["聆聽分鐘"].sum().reset_index()
+            df_year.groupby([song_col, artist_col])["聆聽總分鐘數"].sum().reset_index()
         )
-        top_song_row = song_mins.loc[song_mins["聆聽分鐘"].idxmax()]
-        top_song = top_song_row[song_col]
-        top_song_artist = top_song_row[artist_col]
-        top_song_mins = round(top_song_row["聆聽分鐘"], 1)
+        top_songs_df = song_mins.sort_values(by="聆聽總分鐘數", ascending=False).head(3)
+        top_songs_list = [
+            {"title": row[song_col], "artist": row[artist_col], "mins": round(row["聆聽總分鐘數"], 1)}
+            for _, row in top_songs_df.iterrows()
+        ]
 
         yearly_data.append(
             {
                 "Year": int(year),
-                "Top_Artist": top_artist,
-                "Artist_Minutes": top_artist_mins,
-                "Top_Song": f"《{top_song}》({top_song_artist})",
-                "Song_Minutes": top_song_mins,
+                "Top_Artists": top_artists_list,
+                "Top_Songs": top_songs_list,
             }
         )
 
     return yearly_data
+
+# 6. 獲取聆聽 不重複歌曲數 最高的前 10 名歌手 (供新長條圖使用)
+@app.get("/api/chart/artist_top_song_count")
+def get_artist_top_song_count():
+    df = read_and_clean_data()
+    song_col = "歌曲名" if "歌曲名" in df.columns else df.columns[3]
+    artist_col = "Artist" if "Artist" in df.columns else df.columns[4]
+
+    if artist_col not in df.columns or song_col not in df.columns:
+        return []
+
+    # 核心計算：先算出每位歌手 不重複 的歌曲有哪些
+    unique_songs_df = df.drop_duplicates(subset=[artist_col, song_col])
+
+    # 計算每位歌手擁有幾首不重複的歌曲，並取前 10 名
+    top_artists_by_songs = (
+        unique_songs_df[artist_col].value_counts().reset_index()
+    )
+    top_artists_by_songs.columns = ["Artist", "Song_Count"]
+
+    top10_artists = top_artists_by_songs.head(10)
+
+    return top10_artists.to_dict(orient="records")

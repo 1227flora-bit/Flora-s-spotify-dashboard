@@ -2,6 +2,7 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 import pandas as pd
+import sqlite3
 
 CSV_PATH = "spotify_listen_record.csv"
 
@@ -21,11 +22,29 @@ def read_and_clean_data():
         raise HTTPException(status_code=404, detail="Data file not found")
 
     try:
-        df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+        df_raw = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
     except UnicodeDecodeError:
-        df = pd.read_csv(CSV_PATH, encoding="cp950")
+        df_raw = pd.read_csv(CSV_PATH, encoding="cp950")
 
-    df.columns = df.columns.str.strip()
+    df_raw.columns = df_raw.columns.str.strip()
+
+    # ========================================================
+    # 💾 SQL DATABASE MANAGEMENT (資料庫管理核心邏輯)
+    # ========================================================
+    # 1. 建立輕量級 SQLite 記憶體資料庫
+    conn = sqlite3.connect(":memory:")
+    
+    # 2. 將原始 CSV 轉入 SQL 資料表 (命名為 spotify_logs)
+    df_raw.to_sql("spotify_logs", conn, index=False, if_exists="replace")
+    
+    # 3. 展現 SQL 能力：利用標準 SQL Query 從資料庫撈取所需的數據集
+    # 這裡的 SQL 語法會將資料表內所有欄位完整取出，交給後續 Pipeline 進行特徵工程
+    query = "SELECT * FROM spotify_logs"
+    df = pd.read_sql_query(query, conn)
+    
+    # 4. 關閉資料庫連線，釋放記憶體
+    conn.close()
+    # ========================================================
 
     # 1. 核心時間與分鐘數轉換
     if "ms_played" in df.columns:
